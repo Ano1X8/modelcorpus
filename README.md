@@ -62,6 +62,17 @@ info = gguf.tensor_info(b"t", [1, 1], declared_n_dims=4)
 data = gguf.file(tensors=[info])
 ```
 
+```python
+from modelcorpus.formats import onnx
+
+# A tensor whose dims describe a gigabyte and whose payload is four bytes.
+t = onnx.tensor(name=b"w", dims=[1 << 28], raw_data=b"\x00\x00\x00\x00")
+
+# A graph whose length prefix disagrees with the graph behind it.
+g = onnx.graph(nodes=[onnx.node(b"Relu", [b"x"], [b"y"])])
+data = onnx.model(g, declared_graph_length=len(g) + 4096)
+```
+
 ## Formats
 
 | format | module | status |
@@ -69,8 +80,8 @@ data = gguf.file(tensors=[info])
 | Torch7 `.t7` | `formats.torch7` | tensors, storages, strings, tables, scalars |
 | Darknet `.cfg` + `.weights` | `formats.darknet` | net/convolutional/connected sections, both header versions |
 | GGUF | `formats.gguf` | header, metadata KVs incl. nested arrays, tensor info |
+| ONNX | `formats.onnx` | hand-rolled protobuf: models, graphs, nodes, tensors, value info, attributes incl. subgraphs |
 | TFLite | planned | flatbuffers, so the useful approach is mutating real models rather than writing from scratch |
-| ONNX | planned | protobuf |
 
 Each module documents the wire layout in its docstring and names the reference
 implementation that was read while writing it. The formats are underspecified
@@ -102,17 +113,58 @@ before any mutation:
 
 | target | empty corpus | `modelcorpus` seeds |
 |---|---|---|
+| `readNetFromONNX` | 291 edges | **3,491 edges** (13 seeds) |
 | `readNetFromDarknet` | 2 edges | **932 edges** (10 seeds) |
 | `readNetFromTorch` | 225 edges | **436 edges** (9 seeds) |
 
-The Darknet number is the striking one, and the reason is worth understanding
+The Darknet number is the striking ratio, and the reason is worth understanding
 rather than quoting. That target takes one buffer and splits it into a `.cfg`
 and a `.weights`, so random bytes are not merely an invalid config, they fail
 before the config parser is reached at all. Two edges is the target rejecting
 input at the door. The Torch gain is more modest because a single byte is
 already a syntactically valid, if useless, tagged object.
 
-Reproduce with `modelcorpus seeds darknet --out corpus/`, zip it as
+ONNX is the largest absolute gain and shows what the seeds are actually buying.
+The 291 baseline is protobuf refusing to decode; nothing past the deserialiser
+runs. Each seed carries a different operator, and an importer dispatches on
+operator type, so thirteen files reach thirteen layer handlers that no amount of
+mutation on an empty corpus would arrive at in reasonable time. The number to
+watch when you build your own seed set is not the file count, it is how many
+distinct dispatch arms you cover.
+
+Measured with the OpenCV oss-fuzz targets built with AddressSanitizer, run as
+`<target> -runs=0 <corpus>` so no mutation has happened yet, comparing the
+`INITED` line against an empty directory. `cov:` is the edge count.
+
+## Validity
+
+```
+pip install -e '.[dev]'
+pytest tests/
+```
+
+Every ONNX seed this library generates round-trips through the reference `onnx`
+package (1.22.0) and passes `onnx.checker.check_model(..., full_check=True)`,
+which is a real check rather than a formality — it requires every node input to
+resolve to a graph input, an initializer, or an earlier node's output, and a
+byte-level writer does not satisfy that by accident. The library itself depends
+on nothing and never imports `onnx`; the package is a dev extra used as an
+oracle, which is what `tests/` is for.
+
+`onnx.minimal()` is additionally byte-for-byte identical to what the reference
+package serialises for the same single-node model. Protobuf permits field
+reordering, so that is an observation about a particular serialiser rather than
+something the format owes anyone — but it is the check that pins the field
+numbers and wire types, which is the part of a hand-rolled encoder most likely
+to be quietly wrong.
+
+The no-crash-inputs policy is enforced as a property, not a promise: `tests/`
+asserts that no shipped seed presents an operator with fewer inputs than it is
+defined to take, and that none arrives carrying a subgraph attribute. Those hold
+for seeds nobody has written yet. The full seed set also runs clean through the
+sanitised OpenCV targets above.
+
+Reproduce with `modelcorpus seeds onnx --out corpus/`, zip it as
 `<target>_seed_corpus.zip`, and compare `INITED` lines.
 
 ## License

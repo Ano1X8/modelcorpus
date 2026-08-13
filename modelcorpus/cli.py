@@ -9,10 +9,11 @@ inputs.
 from __future__ import annotations
 
 import argparse
+import struct
 import sys
 from pathlib import Path
 
-from .formats import darknet, gguf, torch7
+from .formats import darknet, gguf, onnx, torch7
 
 
 def _torch7_seeds() -> dict[str, bytes]:
@@ -72,10 +73,83 @@ def _gguf_seeds() -> dict[str, bytes]:
     }
 
 
+def _onnx_seeds() -> dict[str, bytes]:
+    f32s = onnx.f32
+
+    def floats(n: int) -> bytes:
+        return b"".join(f32s(0.0) for _ in range(n))
+
+    def init(name: bytes, dims, count: int) -> bytes:
+        return onnx.tensor(name=name, dims=dims, data_type=onnx.FLOAT,
+                           raw_data=floats(count))
+
+    def one(node, inputs, outputs, initializers=()):
+        return onnx.model(onnx.graph(nodes=[node], inputs=inputs,
+                                     outputs=outputs,
+                                     initializers=initializers))
+
+    v = onnx.value_info
+    nchw = [1, 3, 4, 4]
+
+    seeds: dict[str, bytes] = {
+        "minimal": onnx.minimal(),
+        "relu": one(onnx.node(b"Relu", [b"x"], [b"y"]),
+                    [v(b"x", onnx.FLOAT, nchw)], [v(b"y", onnx.FLOAT, nchw)]),
+        "softmax": one(onnx.node(b"Softmax", [b"x"], [b"y"]),
+                       [v(b"x", onnx.FLOAT, [1, 3])], [v(b"y", onnx.FLOAT, [1, 3])]),
+        "add": one(onnx.node(b"Add", [b"a", b"b"], [b"y"]),
+                   [v(b"a", onnx.FLOAT, nchw), v(b"b", onnx.FLOAT, nchw)],
+                   [v(b"y", onnx.FLOAT, nchw)]),
+        "concat": one(onnx.node(b"Concat", [b"a", b"b"], [b"y"],
+                                attributes=[onnx.attribute_int(b"axis", 1)]),
+                      [v(b"a", onnx.FLOAT, nchw), v(b"b", onnx.FLOAT, nchw)],
+                      [v(b"y", onnx.FLOAT, [1, 6, 4, 4])]),
+        "maxpool": one(onnx.node(b"MaxPool", [b"x"], [b"y"], attributes=[
+                           onnx.attribute_ints(b"kernel_shape", [2, 2]),
+                           onnx.attribute_ints(b"strides", [2, 2])]),
+                       [v(b"x", onnx.FLOAT, nchw)],
+                       [v(b"y", onnx.FLOAT, [1, 3, 2, 2])]),
+        "conv": one(onnx.node(b"Conv", [b"x", b"W"], [b"y"], attributes=[
+                        onnx.attribute_ints(b"kernel_shape", [3, 3])]),
+                    [v(b"x", onnx.FLOAT, nchw)],
+                    [v(b"y", onnx.FLOAT, [1, 2, 2, 2])],
+                    [init(b"W", [2, 3, 3, 3], 54)]),
+        "gemm": one(onnx.node(b"Gemm", [b"a", b"B", b"C"], [b"y"]),
+                    [v(b"a", onnx.FLOAT, [1, 4])],
+                    [v(b"y", onnx.FLOAT, [1, 3])],
+                    [init(b"B", [4, 3], 12), init(b"C", [3], 3)]),
+        "matmul": one(onnx.node(b"MatMul", [b"a", b"B"], [b"y"]),
+                      [v(b"a", onnx.FLOAT, [1, 4])],
+                      [v(b"y", onnx.FLOAT, [1, 3])],
+                      [init(b"B", [4, 3], 12)]),
+        "batchnorm": one(
+            onnx.node(b"BatchNormalization",
+                      [b"x", b"scale", b"bias", b"mean", b"var"], [b"y"]),
+            [v(b"x", onnx.FLOAT, nchw)], [v(b"y", onnx.FLOAT, nchw)],
+            [init(n, [3], 3) for n in (b"scale", b"bias", b"mean", b"var")]),
+        "reshape": one(
+            onnx.node(b"Reshape", [b"x", b"shape"], [b"y"]),
+            [v(b"x", onnx.FLOAT, nchw)], [v(b"y", onnx.FLOAT, [1, 48])],
+            [onnx.tensor(name=b"shape", dims=[2], data_type=onnx.INT64,
+                         raw_data=struct.pack("<qq", 1, 48))]),
+        "chain": onnx.model(onnx.graph(
+            nodes=[onnx.node(b"Relu", [b"x"], [b"h1"]),
+                   onnx.node(b"Sigmoid", [b"h1"], [b"h2"]),
+                   onnx.node(b"Tanh", [b"h2"], [b"y"])],
+            inputs=[v(b"x", onnx.FLOAT, nchw)],
+            outputs=[v(b"y", onnx.FLOAT, nchw)])),
+        "dynamic-dim": one(onnx.node(b"Relu", [b"x"], [b"y"]),
+                           [v(b"x", onnx.FLOAT, [b"N", 3, 4, 4])],
+                           [v(b"y", onnx.FLOAT, [b"N", 3, 4, 4])]),
+    }
+    return seeds
+
+
 BUILDERS = {
     "torch7": (_torch7_seeds, ".t7"),
     "darknet": (_darknet_seeds, ".bin"),
     "gguf": (_gguf_seeds, ".gguf"),
+    "onnx": (_onnx_seeds, ".onnx"),
 }
 
 

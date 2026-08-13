@@ -4,12 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modelcorpus"
-version = "0.1.0"
+version = "0.2.0"
 description = "Writers for ML model file formats, built for testing the parsers that read them"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-keywords = ["fuzzing", "seed-corpus", "gguf", "torch7", "darknet", "parser-testing"]
+keywords = ["fuzzing", "seed-corpus", "onnx", "gguf", "torch7", "darknet", "parser-testing"]
+
+[project.optional-dependencies]
+dev = ["onnx>=1.14", "pytest>=7"]
 
 [project.scripts]
 modelcorpus = "modelcorpus.cli:main"
